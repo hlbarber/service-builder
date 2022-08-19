@@ -112,12 +112,12 @@ impl<Op1, Op2> PokemonServiceBuilder<Op1, Op2> {
 }
 
 impl<S1, S2, L1, L2> PokemonServiceBuilder<Operation<S1, L1>, Operation<S2, L2>> {
-    pub fn build<B>(self) -> PokemonService<RouteService<B>>
+    pub fn build<B, Exts1, Exts2>(self) -> PokemonService<RouteService<B>>
     where
         // GetPokemonSpecies composition
-        UpgradeLayer<AWSRestJsonV1, GetPokemonSpecies, B>: Layer<S1>,
-        L1: Layer<UpgradedService<AWSRestJsonV1, GetPokemonSpecies, B, S1>>,
-        S1: Service<<GetPokemonSpecies as OperationShape>::Input>,
+        UpgradeLayer<AWSRestJsonV1, GetPokemonSpecies, Exts1, B>: Layer<S1>,
+        L1: Layer<UpgradedService<AWSRestJsonV1, GetPokemonSpecies, Exts1, B, S1>>,
+        S1: Service<(<GetPokemonSpecies as OperationShape>::Input, Exts1)>,
         L1::Service: Service<http::Request<B>, Response = http::Response<BoxBody<Bytes, Error>>>,
         L1::Service: Clone + Send + 'static,
         <L1::Service as Service<http::Request<B>>>::Future: Send + 'static,
@@ -125,9 +125,9 @@ impl<S1, S2, L1, L2> PokemonServiceBuilder<Operation<S1, L1>, Operation<S2, L2>>
             Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
 
         // EmptyOperation composition
-        UpgradeLayer<AWSRestJsonV1, EmptyOperation, B>: Layer<S2>,
-        L2: Layer<UpgradedService<AWSRestJsonV1, EmptyOperation, B, S2>>,
-        S2: Service<<EmptyOperation as OperationShape>::Input>,
+        UpgradeLayer<AWSRestJsonV1, EmptyOperation, Exts2, B>: Layer<S2>,
+        L2: Layer<UpgradedService<AWSRestJsonV1, EmptyOperation, Exts2, B, S2>>,
+        S2: Service<(<EmptyOperation as OperationShape>::Input, Exts2)>,
         L2::Service: Service<http::Request<B>, Response = http::Response<BoxBody<Bytes, Error>>>,
         L2::Service: Clone + Send + 'static,
         <L2::Service as Service<http::Request<B>>>::Future: Send + 'static,

@@ -32,7 +32,7 @@ impl<B> FromRequest<AWSRestJsonV1, EmptyOperation, B> for EmptyOperationInput {
 
     type Future = Ready<Result<Self, Self::Error>>;
 
-    fn from_request(_request: http::Request<B>) -> Self::Future {
+    fn from_request(_request: &mut http::Request<B>) -> Self::Future {
         todo!()
     }
 }

@@ -1,34 +1,35 @@
 use std::{convert::Infallible, future::Ready, task::Poll};
 
 use generated::{operations::*, services::*, structures::*};
-use runtime::operation::{AdjoinState, OperationError, OperationShapeExt};
+use runtime::operation::{Extension, OperationError, OperationShapeExt};
 use tower::{util::MapResponseLayer, Service};
 
-/// Fallible handler with state
+// Fallible handler with extensions.
 async fn get_pokemon_species_stateful(
     _input: GetPokemonSpeciesInput,
-    _state: usize,
+    _ext_a: Extension<usize>,
+    _ext_b: Extension<String>,
 ) -> Result<GetPokemonSpeciesOutput, ResourceNotFoundException> {
     todo!()
 }
 
-/// Fallible handler without state
+// Fallible handler without extensions.
 async fn get_pokemon_species(
     _input: GetPokemonSpeciesInput,
 ) -> Result<GetPokemonSpeciesOutput, ResourceNotFoundException> {
     todo!()
 }
 
-/// Infallible handler without state
+// Infallible handler without extensions.
 async fn empty_operation(_input: EmptyOperationInput) -> EmptyOperationOutput {
     todo!()
 }
 
-/// Bespoke implementation of `EmptyOperation`.
+// Bespoke implementation of `EmptyOperation`.
 #[derive(Clone)]
-struct EmptyOperationService;
+struct EmptyOperationServiceA;
 
-impl Service<EmptyOperationInput> for EmptyOperationService {
+impl Service<EmptyOperationInput> for EmptyOperationServiceA {
     type Response = EmptyOperationOutput;
     type Error = OperationError<String, Infallible>;
     type Future = Ready<Result<Self::Response, Self::Error>>;
@@ -42,13 +43,31 @@ impl Service<EmptyOperationInput> for EmptyOperationService {
     }
 }
 
+// Bespoke implementation of `EmptyOperation` with an extension.
+#[derive(Clone)]
+struct EmptyOperationServiceB;
+
+impl Service<(EmptyOperationInput, Extension<String>)> for EmptyOperationServiceB {
+    type Response = EmptyOperationOutput;
+    type Error = OperationError<String, Infallible>;
+    type Future = Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        todo!()
+    }
+
+    fn call(&mut self, _req: (EmptyOperationInput, Extension<String>)) -> Self::Future {
+        todo!()
+    }
+}
+
 fn main() {
     // Various ways of constructing operations
     let _get_pokemon_species = GetPokemonSpecies::from_handler(get_pokemon_species);
     let _empty_operation = EmptyOperation::from_handler(empty_operation);
-    let empty_operation = EmptyOperation::from_service(EmptyOperationService);
-    let get_pokemon_species =
-        GetPokemonSpecies::from_handler(get_pokemon_species_stateful.with_state(29));
+    let _empty_operation = EmptyOperation::from_service(EmptyOperationServiceA);
+    let empty_operation = EmptyOperation::from_service(EmptyOperationServiceB);
+    let get_pokemon_species = GetPokemonSpecies::from_handler(get_pokemon_species_stateful);
 
     // We can apply a layer to them
     let get_pokemon_species = get_pokemon_species.layer(MapResponseLayer::new(|resp| resp));

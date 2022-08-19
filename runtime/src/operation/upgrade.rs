@@ -1,5 +1,6 @@
+#![allow(clippy::type_complexity)]
+
 use std::{
-    convert::Infallible,
     future::Future,
     marker::PhantomData,
     pin::Pin,
@@ -12,82 +13,68 @@ use hyper::body::Bytes;
 use pin_project_lite::pin_project;
 use tower::{Layer, Service};
 
-use super::{OperationError, OperationShape};
+use crate::operation::FromRequest;
 
-/// A protocol and operation aware conversion from [`http`] types to Smithy types.
-pub trait FromRequest<Protocol, Operation, B>: Sized {
-    /// Conversion failure.
-    type Error: IntoResponse<Protocol, Operation>;
-    type Future: Future<Output = Result<Self, Self::Error>>;
-
-    fn from_request(request: http::Request<B>) -> Self::Future;
-}
-
-/// A protocol and operation aware conversion from Smithy types to [`http`] types.
-pub trait IntoResponse<Protocol = (), Operation = ()>: Sized {
-    fn into_response(self) -> http::Response<BoxBody<Bytes, hyper::Error>>;
-}
-
-impl<P, Op> IntoResponse<P, Op> for Infallible {
-    fn into_response(self) -> http::Response<BoxBody<Bytes, hyper::Error>> {
-        match self {}
-    }
-}
+use super::{IntoResponse, OperationError, OperationShape};
 
 /// A [`Layer`] responsible for taking an operation [`Service`], accepting and returning Smithy
 /// types and converting it into a [`Service`] taking and returning [`http`] types.
 ///
 /// See [`Upgrade`].
 #[derive(Debug, Clone)]
-pub struct UpgradeLayer<Protocol, Operation, B> {
+pub struct UpgradeLayer<Protocol, Operation, Exts, B> {
     _protocol: PhantomData<Protocol>,
     _operation: PhantomData<Operation>,
+    _exts: PhantomData<Exts>,
     _body: PhantomData<B>,
 }
 
-impl<Protocol, Operation, B> Default for UpgradeLayer<Protocol, Operation, B> {
+impl<P, Op, E, B> Default for UpgradeLayer<P, Op, E, B> {
     fn default() -> Self {
         Self {
             _protocol: PhantomData,
             _operation: PhantomData,
+            _exts: PhantomData,
             _body: PhantomData,
         }
     }
 }
 
-impl<Protocol, Operation, B> UpgradeLayer<Protocol, Operation, B> {
+impl<Protocol, Operation, Exts, B> UpgradeLayer<Protocol, Operation, Exts, B> {
     /// Creates a new [`UpgradeLayer`].
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl<S, P, Op, B> Layer<S> for UpgradeLayer<P, Op, B> {
-    type Service = Upgrade<P, Op, B, S>;
+impl<S, P, Op, E, B> Layer<S> for UpgradeLayer<P, Op, E, B> {
+    type Service = Upgrade<P, Op, E, B, S>;
 
     fn layer(&self, inner: S) -> Self::Service {
         Upgrade {
             _protocol: PhantomData,
             _operation: PhantomData,
             _body: PhantomData,
+            _exts: PhantomData,
             inner,
         }
     }
 }
 
 /// A alias allowing for quick access to [`UpgradeLayer`]s target [`Service`].
-pub type UpgradedService<P, Op, B, S> = <UpgradeLayer<P, Op, B> as Layer<S>>::Service;
+pub type UpgradedService<P, Op, E, B, S> = <UpgradeLayer<P, Op, E, B> as Layer<S>>::Service;
 
 /// A [`Service`] responsible for wrapping an operation [`Service`] accepting and returning Smithy
 /// types, and converting it into a [`Service`] accepting and returning [`http`] types.
-pub struct Upgrade<Protocol, Operation, B, S> {
+pub struct Upgrade<Protocol, Operation, Exts, B, S> {
     _protocol: PhantomData<Protocol>,
     _operation: PhantomData<Operation>,
+    _exts: PhantomData<Exts>,
     _body: PhantomData<B>,
     inner: S,
 }
 
-impl<P, Op, B, S> Clone for Upgrade<P, Op, B, S>
+impl<P, Op, E, B, S> Clone for Upgrade<P, Op, E, B, S>
 where
     S: Clone,
 {
@@ -96,6 +83,7 @@ where
             _protocol: PhantomData,
             _operation: PhantomData,
             _body: PhantomData,
+            _exts: PhantomData,
             inner: self.inner.clone(),
         }
     }
@@ -103,15 +91,15 @@ where
 
 pin_project! {
     /// The [`Service::Future`] of [`Upgrade`].
-    pub struct UpgradeFuture<Protocol, Operation, B, S>
+    pub struct UpgradeFuture<Protocol, Operation, Exts, B, S>
     where
         Operation: OperationShape,
-        Operation::Input: FromRequest<Protocol, Operation, B>,
-        S: Service<Operation::Input>,
+        (Operation::Input, Exts): FromRequest<Protocol, Operation, B>,
+        S: Service<(Operation::Input, Exts)>,
     {
         service: S,
         #[pin]
-        inner: Inner<<Operation::Input as FromRequest<Protocol, Operation, B>>::Future, S::Future>
+        inner: Inner<<(Operation::Input, Exts) as FromRequest<Protocol, Operation, B>>::Future, S::Future>
     }
 }
 
@@ -130,20 +118,22 @@ pin_project! {
     }
 }
 
-impl<P, Op, B, S, PollError, OpError> Future for UpgradeFuture<P, Op, B, S>
+impl<P, Op, E, B, S, PollError, OpError> Future for UpgradeFuture<P, Op, E, B, S>
 where
-    // Op is used to specify the operation shape
+    // `Op` is used to specify the operation shape
     Op: OperationShape,
-    // Smithy input must be convert from a HTTP request
+    // Smithy input must convert from a HTTP request
     Op::Input: FromRequest<P, Op, B>,
-    // Smithy output must be convert into a HTTP response
+    // Smithy output must convert into a HTTP response
     Op::Output: IntoResponse<P, Op>,
     // Smithy error must convert into a HTTP response
     OpError: IntoResponse<P, Op>,
 
+    // Must be able to convert extensions
+    E: FromRequest<P, Op, B>,
+
     // The signature of the inner service is correct
-    S: Service<Op::Input, Response = Op::Output, Error = OperationError<PollError, OpError>>
-        + Clone,
+    S: Service<(Op::Input, E), Response = Op::Output, Error = OperationError<PollError, OpError>>,
 {
     type Output = Result<http::Response<BoxBody<Bytes, hyper::Error>>, PollError>;
 
@@ -178,18 +168,27 @@ where
     }
 }
 
-impl<P, Op, B, S, PollError, OpError> Service<http::Request<B>> for Upgrade<P, Op, B, S>
+impl<P, Op, E, B, S, PollError, OpError> Service<http::Request<B>> for Upgrade<P, Op, E, B, S>
 where
+    // `Op` is used to specify the operation shape
     Op: OperationShape,
+    // Smithy input must convert from a HTTP request
     Op::Input: FromRequest<P, Op, B>,
+    // Smithy output must convert into a HTTP response
     Op::Output: IntoResponse<P, Op>,
+    // Smithy error must convert into a HTTP response
     OpError: IntoResponse<P, Op>,
-    S: Service<Op::Input, Response = Op::Output, Error = OperationError<PollError, OpError>>
+
+    // Must be able to convert extensions
+    E: FromRequest<P, Op, B>,
+
+    // The signature of the inner service is correct
+    S: Service<(Op::Input, E), Response = Op::Output, Error = OperationError<PollError, OpError>>
         + Clone,
 {
     type Response = http::Response<BoxBody<Bytes, hyper::Error>>;
     type Error = PollError;
-    type Future = UpgradeFuture<P, Op, B, S>;
+    type Future = UpgradeFuture<P, Op, E, B, S>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx).map_err(|err| match err {
@@ -198,11 +197,11 @@ where
         })
     }
 
-    fn call(&mut self, req: http::Request<B>) -> Self::Future {
+    fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
         UpgradeFuture {
             service: self.inner.clone(),
             inner: Inner::FromRequest {
-                inner: <Op::Input as FromRequest<P, Op, B>>::from_request(req),
+                inner: <(Op::Input, E) as FromRequest<P, Op, B>>::from_request(&mut req),
             },
         }
     }

@@ -11,20 +11,16 @@ use futures::{
 };
 use tower::Service;
 
-/// The operation [`Service`] has two classes of failure modes - the failure models specified by
-/// the Smithy model and failures to [`Service::poll_ready`].
-pub enum OperationError<PollError, SmithyError> {
-    /// A [`Service::poll_ready`] failure occured.
-    Poll(PollError),
-    /// An error modelled by the Smithy model occured.
-    Smithy(SmithyError),
-}
+use super::{OperationError, OperationShape};
 
 /// A utility trait used to provide an even interface for all handlers.
-pub trait Handler<Input, Output, Error> {
-    type Future: Future<Output = Result<Output, Error>>;
+pub trait Handler<Op, Exts>
+where
+    Op: OperationShape,
+{
+    type Future: Future<Output = Result<Op::Output, Op::Error>>;
 
-    fn call(&mut self, req: Input) -> Self::Future;
+    fn call(&mut self, input: Op::Input, exts: Exts) -> Self::Future;
 }
 
 /// A utility trait used to provide an even interface over return types `Result<Ok, Error>`/`Ok`.
@@ -47,109 +43,108 @@ impl<Ok> ToResult<Ok, Infallible> for Ok {
 }
 
 // fn(Input) -> Output
-impl<Input, Output, Error, F, Fut> Handler<Input, Output, Error> for F
+impl<Op, F, Fut> Handler<Op, ()> for F
 where
-    F: FnMut(Input) -> Fut,
+    Op: OperationShape,
+    F: Fn(Op::Input) -> Fut,
     Fut: Future,
-    Fut::Output: ToResult<Output, Error>,
+    Fut::Output: ToResult<Op::Output, Op::Error>,
 {
-    type Future = Map<Fut, fn(Fut::Output) -> Result<Output, Error>>;
+    type Future = Map<Fut, fn(Fut::Output) -> Result<Op::Output, Op::Error>>;
 
-    fn call(&mut self, req: Input) -> Self::Future {
-        (self)(req).map(ToResult::into_result)
+    fn call(&mut self, input: Op::Input, _exts: ()) -> Self::Future {
+        (self)(input).map(ToResult::into_result)
     }
 }
 
-/// Adjoins state to a `fn(Input, State) -> Output` to create a [`Handler`].
-#[derive(Clone)]
-pub struct StatefulHandler<F, T> {
-    f: F,
-    state: T,
-}
-
-// fn(Input, State) -> Output
-impl<Input, Output, Error, F, Fut, T> Handler<Input, Output, Error> for StatefulHandler<F, T>
+// fn(Input, Arg0) -> Output
+impl<Op, F, Fut, Ext0> Handler<Op, (Ext0,)> for F
 where
-    T: Clone,
-    F: Fn(Input, T) -> Fut,
+    Op: OperationShape,
+    F: Fn(Op::Input, Ext0) -> Fut,
     Fut: Future,
-    Fut::Output: ToResult<Output, Error>,
+    Fut::Output: ToResult<Op::Output, Op::Error>,
 {
-    type Future = Map<Fut, fn(Fut::Output) -> Result<Output, Error>>;
+    type Future = Map<Fut, fn(Fut::Output) -> Result<Op::Output, Op::Error>>;
 
-    fn call(&mut self, req: Input) -> Self::Future {
-        let Self { f, state } = self;
-        f(req, state.clone()).map(ToResult::into_result)
+    fn call(&mut self, input: Op::Input, exts: (Ext0,)) -> Self::Future {
+        (self)(input, exts.0).map(ToResult::into_result)
     }
 }
 
-/// Provides the ability to [`AdjoinState::with_state`] on closures of the form
-/// `(Input, State) -> Output` converting them to a [`StatefulHandler`] and therefore causing them
-/// to implement [`Handler`].
-pub trait AdjoinState {
-    fn with_state<T>(self, state: T) -> StatefulHandler<Self, T>
-    where
-        Self: Sized,
-    {
-        StatefulHandler { f: self, state }
+// fn(Input, Arg0, Arg1) -> Output
+impl<Op, F, Fut, Ext0, Ext1> Handler<Op, (Ext0, Ext1)> for F
+where
+    Op: OperationShape,
+    F: Fn(Op::Input, Ext0, Ext1) -> Fut,
+    Fut: Future,
+    Fut::Output: ToResult<Op::Output, Op::Error>,
+{
+    type Future = Map<Fut, fn(Fut::Output) -> Result<Op::Output, Op::Error>>;
+
+    fn call(&mut self, input: Op::Input, exts: (Ext0, Ext1)) -> Self::Future {
+        (self)(input, exts.0, exts.1).map(ToResult::into_result)
     }
 }
-
-impl<F> AdjoinState for F {}
 
 /// An extension trait for [`Handler`].
-pub trait HandlerExt<Input, Output, Error>: Handler<Input, Output, Error> {
+pub trait HandlerExt<Op, Exts>: Handler<Op, Exts>
+where
+    Op: OperationShape,
+{
     /// Convert the [`Handler`] into a [`Service`].
-    fn into_service(self) -> IntoService<Output, Error, Self>
+    fn into_service(self) -> IntoService<Op, Self>
     where
         Self: Sized,
     {
         IntoService {
             handler: self,
-            _error: PhantomData,
-            _output: PhantomData,
+            _operation: PhantomData,
         }
     }
 }
 
-impl<Input, Output, Error, H> HandlerExt<Input, Output, Error> for H where
-    H: Handler<Input, Output, Error>
+impl<Op, Exts, H> HandlerExt<Op, Exts> for H
+where
+    Op: OperationShape,
+    H: Handler<Op, Exts>,
 {
 }
 
 /// A [`Service`] provided for every [`Handler`].
-pub struct IntoService<Output, Error, H> {
+pub struct IntoService<Op, H> {
     handler: H,
-    _output: PhantomData<Output>,
-    _error: PhantomData<Error>,
+    _operation: PhantomData<Op>,
 }
 
-impl<Output, Error, H> Clone for IntoService<Output, Error, H>
+impl<Op, H> Clone for IntoService<Op, H>
 where
     H: Clone,
 {
     fn clone(&self) -> Self {
         Self {
             handler: self.handler.clone(),
-            _output: PhantomData,
-            _error: PhantomData,
+            _operation: PhantomData,
         }
     }
 }
 
-impl<Input, Output, Error, H> Service<Input> for IntoService<Output, Error, H>
+impl<Op, Exts, H> Service<(Op::Input, Exts)> for IntoService<Op, H>
 where
-    H: Handler<Input, Output, Error>,
+    Op: OperationShape,
+    H: Handler<Op, Exts>,
 {
-    type Response = Output;
-    type Error = OperationError<Infallible, Error>;
-    type Future = MapErr<H::Future, fn(Error) -> Self::Error>;
+    type Response = Op::Output;
+    type Error = OperationError<Infallible, Op::Error>;
+    type Future = MapErr<H::Future, fn(Op::Error) -> Self::Error>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Input) -> Self::Future {
-        self.handler.call(req).map_err(OperationError::Smithy)
+    fn call(&mut self, (input, exts): (Op::Input, Exts)) -> Self::Future {
+        self.handler
+            .call(input, exts)
+            .map_err(OperationError::Smithy)
     }
 }
